@@ -1,0 +1,27 @@
+2025-12-16 15:11:35,269 INFO: === START job=merged.pdf ===
+2025-12-16 15:11:35,752 INFO: [download] boto3 copy s3://dheera-doc-reader/1111/merged.pdf → pdf_extractor\exec\data\merged.pdf.pdf
+2025-12-16 15:11:36,938 INFO: [download] done, size=1.17 MB
+2025-12-16 15:11:36,958 INFO: [convert] source already PDF, skipping conversion
+2025-12-16 15:11:36,977 INFO: [classify] PDF has 5 pages, processing first 5 pages only
+2025-12-16 15:11:39,837 INFO: [classify] total=5  image=0  chart_like=0  text=5
+2025-12-16 15:11:39,839 INFO: [rotation] start: checking up to 5 pages
+2025-12-16 15:11:40,212 WARNING: [rotation] TEMP: skipping normalized PDF save; using source PDF as normalized
+2025-12-16 15:11:40,213 INFO: [rotation] TEMP: norm_pdf → pdf_extractor\exec\data\merged.pdf.pdf (size=1.17 MB)
+2025-12-16 15:11:40,233 INFO: [rotation] rotated=0  → pdf_extractor\exec\data\merged.pdf.pdf
+2025-12-16 15:11:40,233 INFO: [upload_textract] normalized PDF exists, size=1.17 MB
+2025-12-16 15:11:42,892 INFO: [upload_textract] s3://dheera-doc-reader/merged.pdf/merged.pdf.pdf
+2025-12-16 15:11:42,918 INFO: [textract] starting document analysis for s3://dheera-doc-reader/merged.pdf/merged.pdf.pdf
+2025-12-16 15:11:43,773 INFO: [textract] started job=582acab3c89212bdd8b34a988ffcdaba156e95a2fc5305ff8195abf64c9c0438
+2025-12-16 15:11:43,774 INFO: [vision-parallel] started Vision processing in background
+2025-12-16 15:12:02,542 INFO: [textract] result written → pdf_extractor\exec\textract_output\merged.pdf\textract_raw.json (status=SUCCEEDED)
+2025-12-16 15:12:02,557 INFO: [textract] done → pdf_extractor\exec\textract_output\merged.pdf\textract_raw.json
+2025-12-16 15:12:02,562 INFO: [vision] fallback run (no figures captured in parallel)
+2025-12-16 15:12:03,473 INFO: [vision] Sending 7 cropped figures to GPT-4o...
+2025-12-16 15:12:03,817 INFO: [vision] Sending 7 cropped figures to GPT-4o...
+2025-12-16 15:12:16,398 INFO: [vision] Processed 7 figures.
+2025-12-16 15:12:16,475 INFO: [unify] wrote → pdf_extractor\exec\textract_output\merged.pdf\merged.pdf.pdf.md
+2025-12-16 15:12:17,148 INFO: [upload] s3://dheera-doc-reader/merged.pdf/merged.pdf.pdf.md
+2025-12-16 15:12:17,149 INFO: [cleanup] deleting local artifacts (vision, textract, uploads)
+2025-12-16 15:12:17,154 INFO: [cleanup] keeping vision crops → pdf_extractor\exec\textract_output\merged.pdf\vision_imgs
+2025-12-16 15:12:17,169 INFO: [cleanup] done
+2025-12-16 15:12:17,171 INFO: === DONE job=merged.pdf ===

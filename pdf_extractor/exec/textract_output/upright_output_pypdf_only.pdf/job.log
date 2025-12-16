@@ -1,0 +1,28 @@
+2025-12-16 14:55:17,061 INFO: === START job=upright_output_pypdf_only.pdf ===
+2025-12-16 14:55:17,608 INFO: [download] boto3 copy s3://dheera-doc-reader/1111/upright_output_pypdf_only.pdf → pdf_extractor\exec\data\upright_output_pypdf_only.pdf.pdf
+2025-12-16 14:55:18,617 INFO: [download] done, size=0.76 MB
+2025-12-16 14:55:18,637 INFO: [convert] source already PDF, skipping conversion
+2025-12-16 14:55:18,654 INFO: [classify] PDF has 6 pages, processing first 6 pages only
+2025-12-16 14:55:22,136 INFO: [classify] total=6  image=0  chart_like=0  text=6
+2025-12-16 14:55:22,139 INFO: [rotation] start: checking up to 6 pages
+2025-12-16 14:55:22,699 WARNING: [rotation] TEMP: skipping normalized PDF save; using source PDF as normalized
+2025-12-16 14:55:22,701 INFO: [rotation] TEMP: norm_pdf → pdf_extractor\exec\data\upright_output_pypdf_only.pdf.pdf (size=0.76 MB)
+2025-12-16 14:55:22,716 INFO: [rotation] rotated=0  → pdf_extractor\exec\data\upright_output_pypdf_only.pdf.pdf
+2025-12-16 14:55:22,722 INFO: [upload_textract] normalized PDF exists, size=0.76 MB
+2025-12-16 14:55:23,760 INFO: [upload_textract] s3://dheera-doc-reader/upright_output_pypdf_only.pdf/upright_output_pypdf_only.pdf.pdf
+2025-12-16 14:55:23,780 INFO: [textract] starting document analysis for s3://dheera-doc-reader/upright_output_pypdf_only.pdf/upright_output_pypdf_only.pdf.pdf
+2025-12-16 14:55:24,554 INFO: [textract] started job=5a7b27689d0054732de37bb1457acad49fc6ed090dd02bb514b3a0585b2d7849
+2025-12-16 14:55:24,555 INFO: [vision-parallel] started Vision processing in background
+2025-12-16 14:55:41,160 INFO: [textract] result written → pdf_extractor\exec\textract_output\upright_output_pypdf_only.pdf\textract_raw.json (status=SUCCEEDED)
+2025-12-16 14:55:41,174 INFO: [textract] done → pdf_extractor\exec\textract_output\upright_output_pypdf_only.pdf\textract_raw.json
+2025-12-16 14:55:41,188 INFO: [vision] fallback run (no figures captured in parallel)
+2025-12-16 14:55:41,774 INFO: [vision] No figures found to analyze.
+2025-12-16 14:55:41,803 INFO: [vision] Processed 0 figures.
+2025-12-16 14:55:42,010 INFO: [unify] wrote → pdf_extractor\exec\textract_output\upright_output_pypdf_only.pdf\upright_output_pypdf_only.pdf.pdf.md
+2025-12-16 14:55:42,221 INFO: [vision] No figures found to analyze.
+2025-12-16 14:55:42,238 INFO: [vision] Processed 0 figures.
+2025-12-16 14:55:42,718 INFO: [upload] s3://dheera-doc-reader/upright_output_pypdf_only.pdf/upright_output_pypdf_only.pdf.pdf.md
+2025-12-16 14:55:42,718 INFO: [cleanup] deleting local artifacts (vision, textract, uploads)
+2025-12-16 14:55:42,725 INFO: [cleanup] keeping vision crops → pdf_extractor\exec\textract_output\upright_output_pypdf_only.pdf\vision_imgs
+2025-12-16 14:55:42,744 INFO: [cleanup] done
+2025-12-16 14:55:42,746 INFO: === DONE job=upright_output_pypdf_only.pdf ===

@@ -1,0 +1,28 @@
+2025-12-16 14:41:44,731 INFO: === START job=1111 ===
+2025-12-16 14:41:45,286 INFO: [download] boto3 copy s3://dheera-doc-reader/1111/BMR_Samples.pdf → pdf_extractor\exec\data\1111.pdf
+2025-12-16 14:41:48,897 INFO: [download] done, size=8.80 MB
+2025-12-16 14:41:48,923 INFO: [convert] source already PDF, skipping conversion
+2025-12-16 14:41:48,976 INFO: [classify] PDF has 72 pages, processing first 72 pages only
+2025-12-16 14:42:32,653 INFO: [classify] total=72  image=3  chart_like=0  text=69
+2025-12-16 14:42:32,663 INFO: [rotation] start: checking up to 72 pages
+2025-12-16 14:42:41,847 WARNING: [rotation] TEMP: skipping normalized PDF save; using source PDF as normalized
+2025-12-16 14:42:41,852 INFO: [rotation] TEMP: norm_pdf → pdf_extractor\exec\data\1111.pdf (size=8.80 MB)
+2025-12-16 14:42:41,872 INFO: [rotation] rotated=0  → pdf_extractor\exec\data\1111.pdf
+2025-12-16 14:42:41,872 INFO: [upload_textract] normalized PDF exists, size=8.80 MB
+2025-12-16 14:42:46,860 INFO: [upload_textract] s3://dheera-doc-reader/1111/1111.pdf
+2025-12-16 14:42:46,918 INFO: [textract] starting document analysis for s3://dheera-doc-reader/1111/1111.pdf
+2025-12-16 14:42:47,679 INFO: [textract] started job=d81e92d3143be9d30f9b26e3108676c1eccd9470b6707c15cd8056fd110a3f47
+2025-12-16 14:42:47,681 INFO: [vision-parallel] started Vision processing in background
+2025-12-16 14:44:22,803 INFO: [textract] result written → pdf_extractor\exec\textract_output\1111\textract_raw.json (status=SUCCEEDED)
+2025-12-16 14:44:22,820 INFO: [textract] done → pdf_extractor\exec\textract_output\1111\textract_raw.json
+2025-12-16 14:44:22,906 INFO: [vision] fallback run (no figures captured in parallel)
+2025-12-16 14:44:27,706 INFO: [vision] No figures found to analyze.
+2025-12-16 14:44:27,744 INFO: [vision] No figures found to analyze.
+2025-12-16 14:44:27,791 INFO: [vision] Processed 0 figures.
+2025-12-16 14:44:27,791 INFO: [vision] Processed 0 figures.
+2025-12-16 14:44:29,937 INFO: [unify] wrote → pdf_extractor\exec\textract_output\1111\1111.pdf.md
+2025-12-16 14:44:30,884 INFO: [upload] s3://dheera-doc-reader/1111/1111.pdf.md
+2025-12-16 14:44:30,885 INFO: [cleanup] deleting local artifacts (vision, textract, uploads)
+2025-12-16 14:44:30,903 INFO: [cleanup] keeping vision crops → pdf_extractor\exec\textract_output\1111\vision_imgs
+2025-12-16 14:44:30,920 INFO: [cleanup] done
+2025-12-16 14:44:30,927 INFO: === DONE job=1111 ===

@@ -1,0 +1,26 @@
+{
+  "last_step": "done",
+  "page_count": 5,
+  "image_pages": [],
+  "text_pages": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "chart_pages": [],
+  "source_path": "pdf_extractor\\exec\\data\\merged.pdf.pdf",
+  "local_pdf_path": "pdf_extractor\\exec\\data\\merged.pdf.pdf",
+  "norm_pdf_path": "pdf_extractor\\exec\\data\\merged.pdf.pdf",
+  "ts": 1765878137167,
+  "source_ext": ".pdf",
+  "source_key": "1111/merged.pdf",
+  "converted": false,
+  "rotated_pages": [],
+  "textract_key": "merged.pdf/merged.pdf.pdf",
+  "vision_rendered": true,
+  "vision_figures_processed": 7,
+  "vision_done": true,
+  "output_key": "merged.pdf/merged.pdf.pdf.md"
+}
