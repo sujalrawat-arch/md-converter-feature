@@ -79,7 +79,7 @@ def step_08_upload_and_cleanup(ctx, log):
     log.info("[upload] s3://%s/%s", BUCKET_OUT, key)
 
     log.info("[cleanup] deleting local artifacts (vision, textract, uploads)")
-    cleanup_files = [ctx.norm_pdf, ctx.textract_raw_json, ctx.local_pdf, ctx.source_path]
+    cleanup_files = [ctx.local_pdf, ctx.source_path]
     if not KEEP_VISION_IMAGES:
         cleanup_files.append(ctx.vision_json)
     for path in cleanup_files:

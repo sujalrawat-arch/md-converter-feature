@@ -5,7 +5,6 @@ import os
 
 from .config import USE_VISION
 from .context import JobCtx, setup_logger
-from .steps.classify import step_01_classify
 from .steps.convert_pdf import step_00_convert_to_pdf
 from .steps.download import step_00_download, step_03_upload_norm_for_textract, step_08_upload_and_cleanup
 from .steps.rotation import step_02_rotation
@@ -36,22 +35,16 @@ def run_pipeline(file_id: str, s3_path: str):
         if ctx.last_step in ("", "download"):
             step_00_convert_to_pdf(ctx, log)
         if ctx.last_step in ("", "download", "convert_pdf"):
-            step_01_classify(ctx, log)
-        if ctx.last_step in ("", "download", "convert_pdf", "classify"):
             step_02_rotation(ctx, log)
-        if ctx.last_step in ("", "download", "convert_pdf", "classify", "rotation"):
+        if ctx.last_step in ("", "download", "convert_pdf", "rotation"):
             step_03_upload_norm_for_textract(ctx, log)
-        vision_cb = (lambda: _vision_chain(ctx, log)) if USE_VISION else None
-        if ctx.last_step in ("", "download", "convert_pdf", "classify", "rotation", "upload_textract"):
+        # vision_cb = (lambda: _vision_chain(ctx, log)) if USE_VISION else None
+        # Disabled vision parallel to avoid delays, using fallback only
+        vision_cb = None
+        if ctx.last_step in ("", "download", "convert_pdf", "rotation", "upload_textract"):
             step_04_textract(ctx, log, vision_callback=vision_cb)
-        elif USE_VISION:
-            _vision_chain(ctx, log)
-        # Fallback: if vision is enabled but results are missing/empty after Textract, run it now.
         if USE_VISION:
-            vision_data = read_json(ctx.vision_json, {}) if os.path.exists(ctx.vision_json) else {}
-            if not vision_data.get("figures"):
-                log.info("[vision] fallback run (no figures captured in parallel)")
-                _vision_chain(ctx, log)
+            step_06_vision_async(ctx, log)
         step_07_unify(ctx, log)
         step_08_upload_and_cleanup(ctx, log)
         log.info("=== DONE job=%s ===", file_id)

@@ -128,10 +128,10 @@ def _transpose_grid(grid: List[List[str]]) -> List[List[str]]:
 
 def merge_tables_contextually(raw_tables: List[dict]) -> List[dict]:
     """
-    Smart merging: 
-    - Checks strict column counts
-    - Checks for transposed (pivoted) tables
-    - Checks for reversed column order
+    Ultra-conservative table merging:
+    - Only merge tables on the SAME page
+    - Avoid cross-page merging entirely
+    - Preserve table isolation to prevent data loss
     """
     if not raw_tables: return []
 
@@ -142,71 +142,50 @@ def merge_tables_contextually(raw_tables: List[dict]) -> List[dict]:
 
     for next_t in raw_tables:
         next_grid = next_t.get("grid", [])
-        if not next_grid: continue
+        if not next_grid or len(next_grid) < 1:
+            continue
+        
+        next_header = next_grid[0] if len(next_grid) > 0 else []
+        next_data = next_grid[1:] if len(next_grid) > 1 else []
             
         if current is None:
             current = {
                 "type": "table",
                 "page_start": next_t["page"],
                 "page_end": next_t["page"],
-                "header": next_grid[0],
-                "grid": next_grid[1:], 
-                "col_count": len(next_grid[0]),
+                "header": next_header,
+                "grid": next_data, 
+                "col_count": len(next_header),
                 "bbox": next_t.get("bbox")
             }
             continue
 
-        page_diff = next_t["page"] - current["page_end"]
-        is_continuous = 0 <= page_diff <= 1
+        # ULTRA-CONSERVATIVE: Only merge if on the SAME page
+        same_page = next_t["page"] == current["page_end"]
         current_cols = current["col_count"]
-        next_cols = len(next_grid[0])
+        next_cols = len(next_header)
         
-        candidate_grid = None
-        merge_action = "none"
-
-        if is_continuous:
-            if next_cols == current_cols:
-                candidate_grid = next_grid
-                merge_action = "direct"
-            else:
-                # Try Pivot
-                pivoted = _transpose_grid(next_grid)
-                if len(pivoted) > 0 and len(pivoted[0]) == current_cols:
-                    candidate_grid = pivoted
-                    merge_action = "transposed"
+        should_merge = False
         
-        if candidate_grid:
-            is_header_repeated = False
-            if merge_action == "direct":
-                sim = _grid_similarity(current["header"], candidate_grid[0])
-                if sim > 0.7:
-                    is_header_repeated = True
-            elif merge_action == "transposed":
-                # Check for reversed columns logic
-                curr_sig = _get_column_signature([r[0] for r in current["grid"][-5:]])
-                cand_sig = _get_column_signature([r[0] for r in candidate_grid[:5]])
-                curr_last_sig = _get_column_signature([r[-1] for r in current["grid"][-5:]])
-                
-                # If Column 0 of new grid looks like the LAST column of the old grid, reverse it
-                if curr_sig != cand_sig and cand_sig == curr_last_sig:
-                     candidate_grid = [row[::-1] for row in candidate_grid]
-
-            if is_header_repeated:
-                current["grid"].extend(candidate_grid[1:])
-            else:
-                current["grid"].extend(candidate_grid)
-            
-            current["page_end"] = next_t["page"]
-            
+        if same_page and next_cols == current_cols and next_cols > 0:
+            # Very high threshold: 90% similarity in headers (on same page only)
+            sim = _grid_similarity(current["header"], next_header)
+            if sim > 0.90:
+                should_merge = True
+        
+        if should_merge:
+            # Merge: skip the repeated header and append data rows
+            current["grid"].extend(next_data)
         else:
+            # Don't merge: save current and start new
             merged.append(current)
             current = {
                 "type": "table",
                 "page_start": next_t["page"],
                 "page_end": next_t["page"],
-                "header": next_grid[0],
-                "grid": next_grid[1:],
-                "col_count": len(next_grid[0]),
+                "header": next_header,
+                "grid": next_data,
+                "col_count": len(next_header),
                 "bbox": next_t.get("bbox")
             }
 
@@ -225,6 +204,11 @@ def process_aws_results_smart(blocks: List[dict]) -> List[dict]:
     if not blocks: return []
     
     blocks_map = {block.get("Id"): block for block in blocks if block.get("Id")}
+    
+    # Debug: Check page number distribution
+    page_nums = [b.get("Page", 1) for b in blocks if b.get("BlockType") in ["TABLE", "LINE"]]
+    if page_nums:
+        page_range = (min(page_nums), max(page_nums))
     
     # 1. Extract & Merge Tables
     tables_raw = []
@@ -246,9 +230,10 @@ def process_aws_results_smart(blocks: List[dict]) -> List[dict]:
             rows = get_rows_columns_map(b, blocks_map)
             grid = _rows_to_grid(rows)
             if grid:
+                page_num = int(b.get("Page", 1))
                 bbox = (b.get("Geometry", {}) or {}).get("BoundingBox", {}) or {}
                 tables_raw.append({
-                    "page": int(b.get("Page", 1)),
+                    "page": page_num,
                     "bbox": float(bbox.get("Top", 0.0)),
                     "grid": grid
                 })
@@ -257,12 +242,18 @@ def process_aws_results_smart(blocks: List[dict]) -> List[dict]:
     
     final_items = []
     for t in final_tables:
-        final_items.append({
-            "page": t["page_start"],
-            "top": t["bbox"],
-            "type": "table",
-            "content": table_to_markdown(t["grid"], headers=t["header"])
-        })
+        # Validate table has content
+        if not t.get("header") or not t.get("grid"):
+            continue
+        
+        md_table = table_to_markdown(t["grid"], headers=t["header"])
+        if md_table.strip():  # Only add non-empty tables
+            final_items.append({
+                "page": t["page_start"],
+                "top": t["bbox"],
+                "type": "table",
+                "content": md_table
+            })
         
     # 2. Extract Lines (Text), skipping words that are inside tables
     lines = [b for b in blocks if b.get("BlockType") == "LINE" and (b.get("Text") or "").strip()]
@@ -272,21 +263,26 @@ def process_aws_results_smart(blocks: List[dict]) -> List[dict]:
             if rel["Type"] == "CHILD":
                 l_ids.extend(rel["Ids"])
         
-        # Optimization: Only check overlap if line has content
-        if not l_ids: continue
+        # Skip if empty
+        if not l_ids: 
+            continue
         
-        # Overlap Check
+        # Overlap Check: skip lines that are mostly/entirely inside tables
         matches = sum(1 for wid in l_ids if wid in table_word_ids)
-        if matches > len(l_ids) * 0.9: 
-            continue # Line is inside a table
+        if matches > len(l_ids) * 0.8:  # More conservative: 80% overlap
+            continue
             
         bbox = (line.get("Geometry", {}) or {}).get("BoundingBox", {}) or {}
-        final_items.append({
-            "page": int(line.get("Page", 1)),
-            "top": float(bbox.get("Top", 0.0)),
-            "type": "text",
-            "content": line.get("Text", "").strip()
-        })
+        text = line.get("Text", "").strip()
+        
+        # Filter out junk/noise lines (very short or with mostly special chars)
+        if len(text) > 2:  # At least 3 characters
+            final_items.append({
+                "page": int(line.get("Page", 1)),
+                "top": float(bbox.get("Top", 0.0)),
+                "type": "text",
+                "content": text
+            })
 
     return final_items
 
@@ -298,13 +294,43 @@ def process_aws_results_smart(blocks: List[dict]) -> List[dict]:
 def step_07_unify(ctx, log):
     textract_json = read_json(ctx.textract_raw_json, {}) or {}
     
-    # 1. Flatten all blocks (handles multipage Textract JSON)
+    # 1. Flatten all blocks (handles both flat and nested structures)
     blocks = []
-    for p in textract_json.get("pages", []) or []:
-        blocks.extend(p.get("Blocks", []) or [])
+    
+    # Handle flat structure: {"status": "SUCCEEDED", "pages": [block1, block2, ...]}
+    if textract_json.get("pages") and isinstance(textract_json["pages"], list):
+        pages_data = textract_json["pages"]
+        if pages_data and isinstance(pages_data[0], dict):
+            # Check if it's a flat list of blocks or nested pages
+            if pages_data[0].get("BlockType"):
+                # Flat list of blocks
+                blocks = pages_data
+            else:
+                # Nested structure with page objects
+                for p in pages_data:
+                    blocks.extend(p.get("Blocks", []) or [])
+    
+    # Handle nested structure: {"status": "SUCCEEDED", "Blocks": [...]} (alternative format)
+    if not blocks and textract_json.get("Blocks"):
+        blocks = textract_json.get("Blocks", [])
+
+    if not blocks:
+        log.warning("[unify] No blocks found in textract JSON")
+        ctx.save_status("unify")
+        return
 
     # 2. Process Text & Tables (Using the Efficient Logic)
     processed_items = process_aws_results_smart(blocks)
+    log.info(f"[unify] Processed {len(blocks)} blocks → {len(processed_items)} items")
+    
+    # Debug: Show page distribution
+    items_by_page_temp = {}
+    for item in processed_items:
+        page = item.get("page", 1)
+        items_by_page_temp[page] = items_by_page_temp.get(page, 0) + 1
+    if items_by_page_temp:
+        page_dist = ", ".join([f"P{p}:{c}" for p, c in sorted(items_by_page_temp.items())])
+        log.info(f"[unify] Page distribution: {page_dist}")
     
     # 3. Integrate Vision Data (The Charts/Diagrams from Step 06)
     if USE_VISION:

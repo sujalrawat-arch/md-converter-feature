@@ -6,6 +6,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import List
 
+import fitz
+
 from .config import DATA_DIR, MAX_PAGES, OUTPUT_ROOT
 from .utils import ensure_dir, now_ms, read_json, write_json
 
@@ -56,7 +58,20 @@ class JobCtx:
         state = read_json(self.status_file, {}) or {}
         self.last_step = state.get("last_step", "")
         saved_page_count = state.get("page_count", 0)
-        self.page_count = min(saved_page_count, MAX_PAGES) if saved_page_count > 0 else MAX_PAGES
+        
+        # If no saved page count, read actual page count from PDF
+        if saved_page_count > 0:
+            self.page_count = min(saved_page_count, MAX_PAGES)
+        elif os.path.exists(self.local_pdf):
+            try:
+                doc = fitz.open(self.local_pdf)
+                self.page_count = min(doc.page_count, MAX_PAGES)
+                doc.close()
+            except Exception:
+                self.page_count = MAX_PAGES
+        else:
+            self.page_count = MAX_PAGES
+        
         self.image_pages = [p for p in state.get("image_pages", []) if p < MAX_PAGES]
         self.text_pages = [p for p in state.get("text_pages", []) if p < MAX_PAGES]
         self.chart_pages = [p for p in state.get("chart_pages", []) if p < MAX_PAGES]

@@ -5,7 +5,7 @@ import base64
 import os
 import io
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -19,56 +19,121 @@ from ..config import OPENAI_API_KEY
 from ..utils import write_json, read_json
 
 
-def _group_blocks_by_page(textract_data: dict) -> Dict[int, List[dict]]:
-    """Normalize Textract output that may be either nested under `pages` or flat `Blocks`."""
+def _group_blocks_by_page(textract_data: Union[dict, list]) -> Dict[int, List[dict]]:
+    """
+    Normalize Textract output that may be:
+    1. A dictionary with 'pages' (document analysis wrapper)
+    2. A dictionary with 'Blocks' (standard AWS SDK response)
+    3. A direct list of Blocks (flattened or simplified output)
+    """
     pages: Dict[int, List[dict]] = {}
-
-    if textract_data.get("pages"):
-        for idx, page in enumerate(textract_data.get("pages", []), start=1):
-            # Textract may not place a Page number at the page node; default to its index.
-            page_num = int(page.get("Page", page.get("page", idx)) or idx)
-            for block in page.get("Blocks", []) or []:
-                b_page = int(block.get("Page", page_num) or page_num)
-                pages.setdefault(b_page, []).append(block)
-    elif textract_data.get("Blocks"):
-        for block in textract_data.get("Blocks", []) or []:
+    
+    # CASE 1: Direct List of Blocks
+    if isinstance(textract_data, list):
+        blocks = textract_data
+        for block in blocks:
+            # Default to Page 1 if 'Page' key is missing
             b_page = int(block.get("Page", 1) or 1)
             pages.setdefault(b_page, []).append(block)
+        return pages
+
+    # CASE 2 & 3: Dictionary Wrapper
+    if isinstance(textract_data, dict):
+        # Sub-case: 'pages' key (custom nested structure)
+        if textract_data.get("pages"):
+            pages_array = textract_data.get("pages", [])
+            for item in pages_array:
+                # Check if this is a block with a Page number (flat structure)
+                if item.get("BlockType") and "Page" in item:
+                    b_page = int(item.get("Page") or 1)
+                    pages.setdefault(b_page, []).append(item)
+                # Or if it's a page container with nested blocks (nested structure)
+                elif item.get("BlockType") == "PAGE":
+                    page_num = int(item.get("Page", 1) or 1)
+                    # Add the PAGE block itself
+                    pages.setdefault(page_num, []).append(item)
+                    # Also check for blocks nested under this page
+                    blocks = item.get("Blocks", item.get("blocks", [])) or []
+                    for block in blocks:
+                        b_page = int(block.get("Page", page_num) or page_num)
+                        pages.setdefault(b_page, []).append(block)
+        
+        # Sub-case: Standard AWS 'Blocks' key at root
+        elif textract_data.get("Blocks"):
+            for block in textract_data.get("Blocks", []) or []:
+                b_page = int(block.get("Page", 1) or 1)
+                pages.setdefault(b_page, []).append(block)
+                
+        # Sub-case: Maybe the dict *is* a single block? (Rare, but safety first)
+        elif textract_data.get("BlockType"):
+            b_page = int(textract_data.get("Page", 1) or 1)
+            pages.setdefault(b_page, []).append(textract_data)
 
     return pages
 
 
 def _encode_image_bytes(img_bytes: bytes) -> str:
-    """Encodes raw image bytes to base64 string."""
-    # CHANGED: Use PNG MIME type instead of WEBP
+    """Encodes raw image bytes to base64 string for GPT-4o."""
     return f"data:image/png;base64,{base64.b64encode(img_bytes).decode('utf-8')}"
 
 
-def _get_figure_blocks(blocks_by_page: Dict[int, List[dict]], page_num: int) -> List[dict]:
-    """Extract FIGURE/DIAGRAM blocks already grouped by page."""
+def _get_figure_blocks(blocks_by_page: Dict[int, List[dict]], page_num: int, log=None) -> List[dict]:
+    """
+    Extract FIGURE/DIAGRAM blocks.
+    Enhanced to catch standard Layout Analysis types.
+    """
     figures = []
+    figure_types_detected = {}
+    
+    # Target BlockTypes that represent visuals
+    # LAYOUT_FIGURE: Standard Textract Layout Analysis for charts/images
+    # FIGURE/DIAGRAM: Legacy or other OCR engine outputs
+    target_types = {
+        "FIGURE", "DIAGRAM", "LAYOUT_FIGURE"
+    }
+    
     for block in blocks_by_page.get(page_num, []):
-        if block.get("BlockType") in ["FIGURE", "DIAGRAM", "LAYOUT_FIGURE"]:
+        block_type = block.get("BlockType", "UNKNOWN").upper()
+        
+        if block_type in target_types:
             figures.append(block)
+            figure_types_detected[block_type] = figure_types_detected.get(block_type, 0) + 1
+        
+        # Optional: Check generic LAYOUT_TEXT blocks if they are unusually large or explicit image containers?
+        # For now, we stick to explicit figure types to avoid cropping text paragraphs as images.
+    
+    if log and figures:
+        log.debug(f"[vision-blocks] Page {page_num}: Found {len(figures)} figure blocks: {figure_types_detected}")
+    
     return figures
 
 
-def _is_relevant_figure_block(block: dict) -> bool:
-    """Heuristic filter to skip logos/icons. Keeps medium/large charts/flows."""
+def _is_relevant_figure_block(block: dict, page_num: int = None, log=None) -> bool:
+    """
+    Heuristic filter to skip logos/icons.
+    """
     bbox = block.get("Geometry", {}).get("BoundingBox", {})
     w, h = bbox.get("Width", 0), bbox.get("Height", 0)
     area = w * h
+    block_id = block.get("Id", "unknown")
+    block_type = block.get("BlockType", "UNKNOWN")
 
-    # Reject tiny or thin elements (most logos/icons).
-    if area < 0.01:
+    # Relaxed Thresholds:
+    # 1. Very small icons (social media icons, bullets) -> Skip
+    if area < 0.005:  # Was 0.01 (1% of page). Now 0.5%
+        if log:
+            log.debug(f"[vision-filter] Page {page_num} Block {block_id}: REJECTED - too small (area={area:.4f})")
         return False
-    if w < 0.08 or h < 0.08:
+    
+    # 2. Extreme aspect ratios (lines or dividers parsed as figures) -> Skip
+    # But allow wide headers or tall sidebars if they are explicitly marked as figures.
+    if w < 0.02 or h < 0.02: # Was 0.08. Relaxed to capture thin charts.
+        if log:
+            log.debug(f"[vision-filter] Page {page_num} Block {block_id}: REJECTED - too thin (w={w:.3f}, h={h:.3f})")
         return False
 
-    # Skip very top-left header-like items (common logo spot) if also small-ish.
-    if bbox.get("Top", 1) < 0.08 and h < 0.15:
-        return False
-
+    if log:
+        log.debug(f"[vision-filter] Page {page_num} Block {block_id} ({block_type}): ACCEPTED")
     return True
 
 
@@ -151,24 +216,38 @@ def step_06_vision_async(ctx, log):
     
     # Retry logic if Textract JSON isn't ready yet (race condition)
     if not textract_json:
+        log.warning("[vision] Textract JSON not ready yet, waiting up to 120s...")
         deadline = time.time() + 120
         while time.time() < deadline:
             textract_json = read_json(ctx.textract_raw_json, {})
             if textract_json:
+                log.info("[vision] Textract JSON loaded after wait")
                 break
             time.sleep(1)
 
     if not textract_json:
-        log.warning("[vision] No textract json found after wait; skipping surgical extraction.")
+        log.warning("[vision] No textract json found after wait; skipping vision extraction.")
         return
 
     async def run():
         async_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         semaphore = asyncio.Semaphore(min(5, (os.cpu_count() or 4)))
 
+        # FIX: Ensure we handle list vs dict input correctly
         blocks_by_page = _group_blocks_by_page(textract_json)
+        
+        total_blocks = sum(len(b) for b in blocks_by_page.values())
+        log.info(f"[vision] Textract blocks grouped into {len(blocks_by_page)} pages (Total blocks: {total_blocks})")
+        
+        # Debug: show block type distribution
+        block_type_dist = {}
+        for page_blocks in blocks_by_page.values():
+            for block in page_blocks:
+                bt = block.get("BlockType", "UNKNOWN")
+                block_type_dist[bt] = block_type_dist.get(bt, 0) + 1
+        log.info(f"[vision] Block type distribution: {block_type_dist}")
 
-        # Clear any prior figure crops so the folder only contains the current run.
+        # Clear prior figures
         os.makedirs(ctx.vision_dir, exist_ok=True)
         for name in os.listdir(ctx.vision_dir):
             if name.endswith(".png"):
@@ -183,19 +262,25 @@ def step_06_vision_async(ctx, log):
         pages_to_scan = sorted(set((ctx.image_pages or []) + (ctx.chart_pages or [])))
         if not pages_to_scan:
             pages_to_scan = range(1, ctx.page_count + 1)
+        
+        log.info(f"[vision] Scanning {len(pages_to_scan)} pages for figures")
 
         total_figures = 0
         
         for page_num in pages_to_scan:
             page_blocks = blocks_by_page.get(page_num, [])
+            
+            # Combine all text on page to check for keywords like "Flowchart"
             page_text = " ".join(
                 b.get("Text", "") for b in page_blocks if b.get("BlockType") == "LINE"
             ).lower()
 
-            fig_blocks = _get_figure_blocks(blocks_by_page, page_num)
+            # Extract figure blocks
+            fig_blocks = _get_figure_blocks(blocks_by_page, page_num, log)
 
-            # Fallback: if no figure blocks but page mentions a flow chart, send full page to vision.
+            # Fallback: if explicit Layout blocks missing, but text indicates complex visual
             if not fig_blocks and any(k in page_text for k in ("flow chart", "flowchart", "process flow")):
+                log.info(f"[vision] Page {page_num}: Text mentions flowchart, adding full page for analysis")
                 fig_blocks = [
                     {
                         "BlockType": "FLOWCHART_FALLBACK",
@@ -204,20 +289,36 @@ def step_06_vision_async(ctx, log):
                     }
                 ]
             
-            # Filter to likely charts/flows; drop logos/icons.
-            fig_blocks = [b for b in fig_blocks if _is_relevant_figure_block(b)]
+            # Filter
+            initial_count = len(fig_blocks)
+            fig_blocks = [b for b in fig_blocks if _is_relevant_figure_block(b, page_num, log)]
+            filtered_out = initial_count - len(fig_blocks)
+            
+            if filtered_out > 0:
+                log.debug(f"[vision] Page {page_num}: Filtered out {filtered_out} blocks")
 
             if not fig_blocks:
                 continue
+            
+            log.info(f"[vision] Page {page_num}: Processing {len(fig_blocks)} figures")
 
             # Load Page (0-indexed)
-            page_obj = doc.load_page(page_num - 1)
+            try:
+                page_obj = doc.load_page(page_num - 1)
+            except ValueError:
+                log.error(f"[vision] Page {page_num} does not exist in PDF. Skipping.")
+                continue
+
             w, h = page_obj.rect.width, page_obj.rect.height
 
             for block in fig_blocks:
                 bbox = (block.get("Geometry", {}) or {}).get("BoundingBox", {}) or {}
                 
-                # Convert normalized bbox to PDF coordinates
+                # Check for invalid geometry
+                if not bbox:
+                    log.warning(f"[vision] Block {block.get('Id')} missing geometry. Skipping.")
+                    continue
+
                 rect = fitz.Rect(
                     bbox.get("Left", 0.0) * w,
                     bbox.get("Top", 0.0) * h,
@@ -226,8 +327,6 @@ def step_06_vision_async(ctx, log):
                 )
                 
                 pix = page_obj.get_pixmap(clip=rect, dpi=200, colorspace=fitz.csRGB)
-                
-                # CHANGED: Use 'png' instead of 'webp' to fix ValueError
                 img_bytes = pix.tobytes("png") 
 
                 figure_idx = total_figures + 1
@@ -249,13 +348,20 @@ def step_06_vision_async(ctx, log):
         doc.close()
 
         if not tasks:
-            log.info("[vision] No figures found to analyze.")
+            log.info("[vision] No figures found to analyze across all pages.")
             return {"figures": [], "count": 0}
 
-        log.info("[vision] Sending %d cropped figures to GPT-4o...", total_figures)
+        log.info(f"[vision] Sending {total_figures} figures to GPT-4o for analysis...")
         results = await asyncio.gather(*tasks)
         
         ok_results = [r for r in results if r.get("ok")]
+        failed_results = [r for r in results if not r.get("ok")]
+        
+        if failed_results:
+            log.warning(f"[vision] {len(failed_results)} figures failed analysis")
+        
+        log.info(f"[vision] Analysis complete: {len(ok_results)}/{total_figures} succeeded")
+        
         return {"figures": ok_results, "count": total_figures}
 
     result = asyncio.run(run()) or {"figures": [], "count": 0}
@@ -269,4 +375,4 @@ def step_06_vision_async(ctx, log):
             "vision_done": True,
         },
     )
-    log.info("[vision] Processed %d figures.", result.get("count", 0))
+    log.info(f"[vision] Step complete - Processed {result.get('count', 0)} figures.")
