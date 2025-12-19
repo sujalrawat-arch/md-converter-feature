@@ -1,0 +1,16 @@
+[Unit]
+Description=Concurrent SQS PDF Extractor Worker Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/SQS/Prod
+ExecStart=/usr/bin/python3 -m Prod.sqs_worker_concurrent
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ubuntu/SQS/Prod/.env
+
+[Install]
+WantedBy=multi-user.target
+

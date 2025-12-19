@@ -87,3 +87,7 @@ AWS_SEC = SETTINGS.aws_secret
 MAX_PAGES = SETTINGS.max_pages
 USE_VISION = SETTINGS.use_vision
 KEEP_VISION_IMAGES = SETTINGS.keep_vision_images
+
+# SQS Queue URLs
+SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL")  # PDF extraction input queue
+RAG_INGESTION_QUEUE_URL = os.getenv("RAG_INGESTION_QUEUE_URL")  # RAG pipeline output queue

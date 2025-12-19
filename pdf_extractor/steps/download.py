@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 from pathlib import Path
 
+import boto3
+from botocore.exceptions import ClientError
+
 from ..aws_clients import s3_client
-from ..config import BUCKET_OUT, BUCKET_TEX, KEEP_VISION_IMAGES
+from ..config import BUCKET_OUT, BUCKET_TEX, KEEP_VISION_IMAGES, AWS_REGION, RAG_INGESTION_QUEUE_URL
 
 
 def step_00_download(ctx, log):
@@ -76,10 +80,15 @@ def step_08_upload_and_cleanup(ctx, log):
     key = f"{ctx.file_id}/{os.path.basename(ctx.final_md)}"
     s3 = s3_client()
     s3.upload_file(ctx.final_md, BUCKET_OUT, key)
+    https_url = f"https://{BUCKET_OUT}.s3.{AWS_REGION}.amazonaws.com/{key}"
+    payload = {
+        "file_id": ctx.file_id,
+        "s3_path": https_url
+    }
     log.info("[upload] s3://%s/%s", BUCKET_OUT, key)
 
     log.info("[cleanup] deleting local artifacts (vision, textract, uploads)")
-    cleanup_files = [ctx.local_pdf, ctx.source_path]
+    cleanup_files = [ctx.norm_pdf, ctx.textract_raw_json, ctx.local_pdf, ctx.source_path]
     if not KEEP_VISION_IMAGES:
         cleanup_files.append(ctx.vision_json)
     for path in cleanup_files:
@@ -92,3 +101,41 @@ def step_08_upload_and_cleanup(ctx, log):
         shutil.rmtree(ctx.vision_dir, ignore_errors=True)
     ctx.save_status("done", {"output_key": key})
     log.info("[cleanup] done")
+    
+    # Trigger RAG ingestion pipeline via SQS
+    _trigger_rag_pipeline_sqs(payload, log)
+
+
+def _trigger_rag_pipeline_sqs(payload: dict, log):
+    """Send processed document to RAG ingestion queue.
+    
+    Args:
+        payload: Dict with 'file_id' and 's3_path' keys
+        log: Logger instance
+    """
+    if not RAG_INGESTION_QUEUE_URL:
+        log.warning("[sqs-output] RAG_INGESTION_QUEUE_URL not configured, skipping RAG pipeline trigger")
+        return
+    
+    try:
+        sqs = boto3.client(
+            "sqs",
+            region_name=AWS_REGION,
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+        
+        response = sqs.send_message(
+            QueueUrl=RAG_INGESTION_QUEUE_URL,
+            MessageBody=json.dumps(payload)
+        )
+        
+        log.info("[sqs-output] Message sent to RAG ingestion queue")
+        log.info("[sqs-output] MessageId: %s", response.get("MessageId"))
+        log.info("[sqs-output] File ID: %s", payload.get("file_id"))
+        log.info("[sqs-output] S3 Path: %s", payload.get("s3_path"))
+        
+    except ClientError as e:
+        log.error("[sqs-output] Failed to send to RAG ingestion queue: %s", str(e))
+    except Exception as e:
+        log.error("[sqs-output] Unexpected error: %s", str(e))
