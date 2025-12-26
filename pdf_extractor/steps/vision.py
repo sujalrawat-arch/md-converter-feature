@@ -7,8 +7,15 @@ import io
 import time
 from typing import List, Dict, Any, Union
 
+
 import fitz  # PyMuPDF
 from PIL import Image
+
+# Import log_llm_credits for logging LLM token usage
+try:
+    from Prod.helper import log_llm_credits
+except ImportError:
+    log_llm_credits = None
 
 try:
     from openai import AsyncOpenAI
@@ -148,7 +155,7 @@ def step_05_render_for_vision(ctx, log):
     ctx.save_status("vision_rendered", {"vision_rendered": True})
 
 
-async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, retries=2):
+async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, retries=2, ctx=None, log=None):
     """
     Analyzes a single cropped figure (Chart/Graph/Flowchart).
     """
@@ -174,12 +181,39 @@ async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, r
                     {"type": "image_url", "image_url": {"url": _encode_image_bytes(img_bytes)}},
                 ]
                 resp = await async_client.chat.completions.create(
-                    model="gpt-4o", 
+                    model="gpt-4o",
                     messages=[{"role": "user", "content": content}],
                     temperature=0.0,
                     max_tokens=1000,
                 )
                 txt = resp.choices[0].message.content
+
+                # --- LLM Token Logging ---
+                # Instead of logging here, collect usage for aggregation in step_06_vision_async
+                usage = getattr(resp, 'usage', None)
+                tokens_used = None
+                input_size = None
+                output_size = None
+                if usage:
+                    tokens_used = usage.get('total_tokens') or usage.get('total', None)
+                    input_size = usage.get('prompt_tokens') or usage.get('prompt', None)
+                    output_size = usage.get('completion_tokens') or usage.get('completion', None)
+                # Attach usage info to result for aggregation
+                llm_usage = {
+                    'tokens_used': tokens_used or 0,
+                    'input_size': input_size or 0,
+                    'output_size': output_size or 0
+                }
+                return {
+                    "page": fig_meta["page"],
+                    "bbox": fig_meta["bbox"],
+                    "block_id": fig_meta["id"],
+                    "image_path": fig_meta.get("image_path"),
+                    "analysis": txt,
+                    "ok": True,
+                    "llm_usage": llm_usage
+                }
+
                 return {
                     "page": fig_meta["page"],
                     "bbox": fig_meta["bbox"],
@@ -229,25 +263,20 @@ def step_06_vision_async(ctx, log):
         log.warning("[vision] No textract json found after wait; skipping vision extraction.")
         return
 
+
     async def run():
         async_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         semaphore = asyncio.Semaphore(min(5, (os.cpu_count() or 4)))
 
-        # FIX: Ensure we handle list vs dict input correctly
         blocks_by_page = _group_blocks_by_page(textract_json)
-        
         total_blocks = sum(len(b) for b in blocks_by_page.values())
         log.info(f"[vision] Textract blocks grouped into {len(blocks_by_page)} pages (Total blocks: {total_blocks})")
-        
-        # Debug: show block type distribution
         block_type_dist = {}
         for page_blocks in blocks_by_page.values():
             for block in page_blocks:
                 bt = block.get("BlockType", "UNKNOWN")
                 block_type_dist[bt] = block_type_dist.get(bt, 0) + 1
         log.info(f"[vision] Block type distribution: {block_type_dist}")
-
-        # Clear prior figures
         os.makedirs(ctx.vision_dir, exist_ok=True)
         for name in os.listdir(ctx.vision_dir):
             if name.endswith(".png"):
@@ -255,30 +284,19 @@ def step_06_vision_async(ctx, log):
                     os.remove(os.path.join(ctx.vision_dir, name))
                 except OSError:
                     pass
-        
         tasks = []
         doc = fitz.open(ctx.norm_pdf)
-        
         pages_to_scan = sorted(set((ctx.image_pages or []) + (ctx.chart_pages or [])))
         if not pages_to_scan:
             pages_to_scan = range(1, ctx.page_count + 1)
-        
         log.info(f"[vision] Scanning {len(pages_to_scan)} pages for figures")
-
         total_figures = 0
-        
         for page_num in pages_to_scan:
             page_blocks = blocks_by_page.get(page_num, [])
-            
-            # Combine all text on page to check for keywords like "Flowchart"
             page_text = " ".join(
                 b.get("Text", "") for b in page_blocks if b.get("BlockType") == "LINE"
             ).lower()
-
-            # Extract figure blocks
             fig_blocks = _get_figure_blocks(blocks_by_page, page_num, log)
-
-            # Fallback: if explicit Layout blocks missing, but text indicates complex visual
             if not fig_blocks and any(k in page_text for k in ("flow chart", "flowchart", "process flow")):
                 log.info(f"[vision] Page {page_num}: Text mentions flowchart, adding full page for analysis")
                 fig_blocks = [
@@ -288,82 +306,91 @@ def step_06_vision_async(ctx, log):
                         "Id": f"flowchart_page_{page_num}",
                     }
                 ]
-            
-            # Filter
             initial_count = len(fig_blocks)
             fig_blocks = [b for b in fig_blocks if _is_relevant_figure_block(b, page_num, log)]
             filtered_out = initial_count - len(fig_blocks)
-            
             if filtered_out > 0:
                 log.debug(f"[vision] Page {page_num}: Filtered out {filtered_out} blocks")
-
             if not fig_blocks:
                 continue
-            
             log.info(f"[vision] Page {page_num}: Processing {len(fig_blocks)} figures")
-
-            # Load Page (0-indexed)
             try:
                 page_obj = doc.load_page(page_num - 1)
             except ValueError:
                 log.error(f"[vision] Page {page_num} does not exist in PDF. Skipping.")
                 continue
-
             w, h = page_obj.rect.width, page_obj.rect.height
-
             for block in fig_blocks:
                 bbox = (block.get("Geometry", {}) or {}).get("BoundingBox", {}) or {}
-                
-                # Check for invalid geometry
                 if not bbox:
                     log.warning(f"[vision] Block {block.get('Id')} missing geometry. Skipping.")
                     continue
-
                 rect = fitz.Rect(
                     bbox.get("Left", 0.0) * w,
                     bbox.get("Top", 0.0) * h,
                     (bbox.get("Left", 0.0) + bbox.get("Width", 1.0)) * w,
                     (bbox.get("Top", 0.0) + bbox.get("Height", 1.0)) * h
                 )
-                
                 pix = page_obj.get_pixmap(clip=rect, dpi=200, colorspace=fitz.csRGB)
-                img_bytes = pix.tobytes("png") 
-
+                img_bytes = pix.tobytes("png")
                 figure_idx = total_figures + 1
                 img_filename = f"page_{page_num:04d}_figure_{figure_idx:04d}.png"
                 img_path = os.path.join(ctx.vision_dir, img_filename)
                 with open(img_path, "wb") as fh:
                     fh.write(img_bytes)
-                
                 meta = {
                     "page": page_num,
                     "bbox": float(bbox.get("Top", 0.0)),
                     "id": block.get("Id"),
                     "image_path": img_path,
                 }
-                
-                tasks.append(_vision_analyze_figure(async_client, semaphore, img_bytes, meta))
+                tasks.append(_vision_analyze_figure(async_client, semaphore, img_bytes, meta, ctx=ctx, log=log))
                 total_figures += 1
-                
         doc.close()
-
         if not tasks:
             log.info("[vision] No figures found to analyze across all pages.")
             return {"figures": [], "count": 0}
-
         log.info(f"[vision] Sending {total_figures} figures to GPT-4o for analysis...")
         results = await asyncio.gather(*tasks)
-        
         ok_results = [r for r in results if r.get("ok")]
         failed_results = [r for r in results if not r.get("ok")]
-        
+        # Aggregate LLM usage
+        agg_tokens_used = 0
+        agg_input_size = 0
+        agg_output_size = 0
+        for r in results:
+            if isinstance(r, dict) and 'llm_usage' in r and r['llm_usage']:
+                usage = r['llm_usage']
+                agg_tokens_used += usage.get('tokens_used', 0) or 0
+                agg_input_size += usage.get('input_size', 0) or 0
+                agg_output_size += usage.get('output_size', 0) or 0
+        # Log a single credit entry for the whole vision step
+        if log_llm_credits and ctx and hasattr(ctx, 'db_session'):
+            try:
+                log.info(f"[vision] Logging total LLM credits for vision step: tokens={agg_tokens_used}, input={agg_input_size}, output={agg_output_size}")
+                task_id = log_llm_credits(
+                    db=ctx.db_session,
+                    user_id=getattr(ctx, 'user_id', 'unknown'),
+                    customer_id=getattr(ctx, 'customer_id', 'unknown'),
+                    project_id=getattr(ctx, 'project_id', 'unknown'),
+                    tenant_id=getattr(ctx, 'tenant_id', 'unknown'),
+                    task_type='vision-figure',
+                    task_date_time=datetime.now(),
+                    input_size=agg_input_size,
+                    output_size=agg_output_size,
+                    tokens_used=agg_tokens_used,
+                    model_used='gpt-4o',
+                )
+                if not task_id:
+                    log.error("[vision] log_llm_credits returned None (failed to log credits)")
+                else:
+                    log.info(f"[vision] log_llm_credits returned task_id: {task_id}")
+            except Exception as e:
+                log.error(f"[vision] Exception in log_llm_credits: {e}")
         if failed_results:
             log.warning(f"[vision] {len(failed_results)} figures failed analysis")
-        
         log.info(f"[vision] Analysis complete: {len(ok_results)}/{total_figures} succeeded")
-        
         return {"figures": ok_results, "count": total_figures}
-
     result = asyncio.run(run()) or {"figures": [], "count": 0}
     
     write_json(ctx.vision_json, result)

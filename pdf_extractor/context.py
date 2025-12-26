@@ -28,6 +28,17 @@ class JobCtx:
     textract_raw_json: str
     vision_json: str
     final_md: str
+    # --- metadata from SQS payload / caller ---
+    user_id: str = ""
+    tenant_id: str = ""
+    customer_id: str = ""
+    project_id: str = ""
+    file_name: str = ""
+    platform_file_path: str = ""
+    version: int = 1
+    message: str = ""
+    ai_file_id: str = ""  # db ai id once created/upserted
+    # --- runtime state ---
     last_step: str = ""
     page_count: int = 0
     image_pages: List[int] = field(default_factory=list)
@@ -52,6 +63,37 @@ class JobCtx:
             textract_raw_json=os.path.join(job_dir, "textract_raw.json"),
             vision_json=os.path.join(job_dir, "vision_results.json"),
             final_md=os.path.join(job_dir, f"{fid}.pdf.md"),
+        )
+
+    @staticmethod
+    def build_from_payload(payload: dict) -> "JobCtx":
+        fid = str(payload.get("file_id", "")).strip()
+        s3_path = str(payload.get("s3_path", "")).strip()
+        job_dir = ensure_dir(os.path.join(OUTPUT_ROOT, fid))
+        return JobCtx(
+            file_id=fid,
+            s3_path=s3_path,
+            job_dir=job_dir,
+            log_file=os.path.join(job_dir, "job.log"),
+            status_file=os.path.join(job_dir, "status.json"),
+            api_status_file=os.path.join(job_dir, "api_status.json"),
+            source_path=os.path.join(DATA_DIR, f"{fid}.source"),
+            local_pdf=os.path.join(DATA_DIR, f"{fid}.pdf"),
+            norm_pdf=os.path.join(job_dir, f"{fid}.normalized.pdf"),
+            pages_dir=ensure_dir(os.path.join(job_dir, "pages")),
+            vision_dir=ensure_dir(os.path.join(job_dir, "vision_imgs")),
+            textract_raw_json=os.path.join(job_dir, "textract_raw.json"),
+            vision_json=os.path.join(job_dir, "vision_results.json"),
+            final_md=os.path.join(job_dir, f"{fid}.pdf.md"),
+            user_id=str(payload.get("user_id", "")).strip(),
+            tenant_id=str(payload.get("tenant_id", "")).strip(),
+            customer_id=str(payload.get("customer_id", "")) or str(payload.get("tenant_id", "")).strip(),
+            project_id=str(payload.get("project_id", "")) or str(payload.get("tenant_id", "")).strip(),
+            file_name=str(payload.get("filename", "")) or str(payload.get("file_name", "")).strip() or fid,
+            platform_file_path=str(payload.get("s3_path", "")).strip(),
+            version=int(payload.get("version", 1) or 1),
+            message=str(payload.get("message", "")).strip(),
+            ai_file_id=str(payload.get("ai_file_id", "")).strip() or fid,
         )
 
     def load_status(self) -> None:

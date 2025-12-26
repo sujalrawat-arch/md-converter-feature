@@ -106,32 +106,38 @@ def _delete_message(sqs_client: Any, queue_url: str, receipt_handle: Optional[st
 def _parse_payload(body: str) -> dict[str, Any]:
     """Parse and validate SQS message body for the pipeline.
 
-    Expected JSON structure:
+    Expected JSON structure (all strings unless noted):
     {
-        "job_id": "<string>",
-        "s3_bucket": "<string>",
-        "s3_key": "<string>"
+        "user_id": "...",
+        "tenant_id": "...",
+        "file_id": "...",
+        "filename": "...",
+        "version": <int>,
+        "s3_path": "...",
+        "message": "...",
+        "customer_id": "..." (optional),
+        "project_id": "..." (optional)
     }
     """
     import json
 
     payload = json.loads(body)
-    required = ["job_id", "s3_bucket", "s3_key"]
+    required = ["user_id", "tenant_id", "file_id", "filename", "version", "s3_path"]
     missing = [f for f in required if f not in payload]
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
 
-    job_id = str(payload["job_id"]).strip()
-    s3_bucket = str(payload["s3_bucket"]).strip()
-    s3_key = str(payload["s3_key"]).strip()
-
-    if not job_id or not s3_bucket or not s3_key:
-        raise ValueError(
-            f"Empty values in required fields: job_id='{job_id}', s3_bucket='{s3_bucket}', s3_key='{s3_key}'"
-        )
-
-    s3_path = f"s3://{s3_bucket}/{s3_key}"
-    return {"job_id": job_id, "s3_path": s3_path}
+    # basic normalization
+    payload["file_id"] = str(payload["file_id"]).strip()
+    payload["s3_path"] = str(payload["s3_path"]).strip()
+    payload["filename"] = str(payload["filename"]).strip()
+    payload["user_id"] = str(payload["user_id"]).strip()
+    payload["tenant_id"] = str(payload["tenant_id"]).strip()
+    try:
+        payload["version"] = int(payload.get("version", 1) or 1)
+    except Exception:
+        payload["version"] = 1
+    return payload
 
 
 def worker_loop(queue_url: str) -> None:
@@ -171,7 +177,7 @@ def worker_loop(queue_url: str) -> None:
             try:
                 # Parse payload and run pipeline synchronously (CPU-heavy)
                 payload = _parse_payload(body)
-                run_pipeline(payload["job_id"], payload["s3_path"])  # raises on failure
+                run_pipeline(payload)  # raises on failure
 
                 # On success, delete message
                 _delete_message(sqs_client, queue_url, receipt_handle, message_id)

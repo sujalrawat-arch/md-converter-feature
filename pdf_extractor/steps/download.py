@@ -87,6 +87,39 @@ def step_08_upload_and_cleanup(ctx, log):
     }
     log.info("[upload] s3://%s/%s", BUCKET_OUT, key)
 
+    # Update DB with the public MD URL so downstream services read the hosted file
+    db = None
+    try:
+        from db.connection import SessionLocal
+        from helper import update_md_file_info
+
+        db = SessionLocal()
+        update_result = update_md_file_info(
+            db=db,
+            ai_file_id=ctx.ai_file_id or ctx.file_id,
+            tenant_id=ctx.tenant_id or "",
+            md_file_path=https_url,
+            md_file_id=ctx.ai_file_id or ctx.file_id,
+        )
+        if update_result:
+            log.info(
+                "[upload] Updated md_file_path in DB to hosted URL for ai_file_id=%s",
+                ctx.ai_file_id or ctx.file_id,
+            )
+        else:
+            log.warning(
+                "[upload] Failed to update md_file_path in DB for ai_file_id=%s",
+                ctx.ai_file_id or ctx.file_id,
+            )
+    except Exception as e:
+        log.error("[upload] Exception during DB update with md URL: %s", e)
+    finally:
+        try:
+            if db:
+                db.close()
+        except Exception:
+            pass
+
     log.info("[cleanup] deleting local artifacts (vision, textract, uploads)")
     cleanup_files = [ctx.norm_pdf, ctx.textract_raw_json, ctx.local_pdf, ctx.source_path]
     if not KEEP_VISION_IMAGES:

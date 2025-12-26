@@ -20,15 +20,51 @@ def _vision_chain(ctx, log):
         return
     step_05_render_for_vision(ctx, log)
     step_06_vision_async(ctx, log)
+def run_pipeline(payload_or_file_id, s3_path: str | None = None):
+    """Run pipeline using either legacy args or a full payload dict.
 
+    payload dict keys expected: file_id, s3_path, user_id, tenant_id,
+    customer_id, project_id, filename, version, message.
+    """
+    if isinstance(payload_or_file_id, dict):
+        payload = payload_or_file_id
+        file_id = str(payload.get("file_id", "")).strip()
+        s3 = str(payload.get("s3_path", "")).strip()
+        ctx = JobCtx.build_from_payload(payload)
+    else:
+        file_id = str(payload_or_file_id)
+        s3 = str(s3_path)
+        ctx = JobCtx.build(file_id, s3)
 
-def run_pipeline(file_id: str, s3_path: str):
-    ctx = JobCtx.build(file_id, s3_path)
     log = setup_logger(ctx)
     log.info("=== START job=%s ===", file_id)
     ctx.load_status()
     if not USE_VISION:
         log.info("[vision] disabled via env (PDF_EXTRACTOR_USE_VISION/USE_VISION)")
+
+    # DB: upsert initial file record using provided metadata
+    try:
+        from db.connection import SessionLocal
+        from helper import handle_file_from_files_ms
+
+        db = SessionLocal()
+        db_info = handle_file_from_files_ms(
+            db=db,
+            external_file_id=file_id,
+            user_id=ctx.user_id or file_id,
+            tenant_id=ctx.tenant_id or "default_tenant",
+            customer_id=ctx.customer_id or (ctx.tenant_id or "default_customer"),
+            project_id=ctx.project_id or (ctx.tenant_id or "default_project"),
+            file_name=ctx.file_name or file_id,
+            platform_file_path=ctx.platform_file_path or s3,
+            version=ctx.version or 1,
+        )
+        if db_info and db_info.get("ai_file_id"):
+            ctx.ai_file_id = db_info["ai_file_id"]
+        db.close()
+    except Exception as exc:
+        log.warning("[db] skipped/failed to upsert file record: %s", exc)
+
     try:
         if ctx.last_step == "":
             step_00_download(ctx, log)

@@ -383,6 +383,6 @@ def step_07_unify(ctx, log):
 
     with open(ctx.final_md, "w", encoding="utf-8") as fh:
         fh.write("\n".join(md))
-    
+
     ctx.save_status("unify")
     log.info("[unify] wrote → %s", ctx.final_md)
