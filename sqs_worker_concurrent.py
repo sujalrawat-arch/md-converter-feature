@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 WAIT_TIME_SECONDS = 20
 MAX_NUMBER_OF_MESSAGES = 1
 VISIBILITY_TIMEOUT = int(os.getenv("SQS_VISIBILITY_TIMEOUT", "300"))  # seconds
+PIPELINE_MESSAGE_TYPES = {"", "newfile", "versionchange"}
 
 
 def _create_sqs_client() -> Any:
@@ -137,7 +138,67 @@ def _parse_payload(body: str) -> dict[str, Any]:
         payload["version"] = int(payload.get("version", 1) or 1)
     except Exception:
         payload["version"] = 1
+    payload["message"] = str(payload.get("message", "")).strip().lower()
     return payload
+
+
+def _process_message_by_type(payload: dict[str, Any]) -> str:
+    """Route SQS message based on message type.
+
+    Returns a short action label used for logging.
+    Raises on failure so SQS retains the message for retry.
+    """
+
+    message_type = payload.get("message", "")
+
+    if message_type in PIPELINE_MESSAGE_TYPES:
+        run_pipeline(payload)
+        return "pipeline"
+
+    # DB-only flows
+    from db.connection import SessionLocal
+    from helper import handle_delete_file_event, handle_rename_file_event
+
+    db = SessionLocal()
+    try:
+        if message_type == "deletedfile":
+            result = handle_delete_file_event(
+                db=db,
+                external_file_id=payload.get("file_id", ""),
+                tenant_id=payload.get("tenant_id", ""),
+                file_name=payload.get("filename", ""),
+                s3_file_path=payload.get("s3_path"),
+                platform_file_path=payload.get("platform_file_path") or payload.get("s3_path"),
+                version=payload.get("version"),
+            )
+            if not result:
+                raise RuntimeError("delete_file_event failed")
+            return "deleted"
+
+        if message_type == "renamedfile":
+            result = handle_rename_file_event(
+                db=db,
+                external_file_id=payload.get("file_id", ""),
+                user_id=payload.get("user_id", ""),
+                tenant_id=payload.get("tenant_id", ""),
+                customer_id=payload.get("customer_id") or payload.get("tenant_id", ""),
+                project_id=payload.get("project_id") or payload.get("tenant_id", ""),
+                new_file_name=payload.get("filename", ""),
+                s3_file_path=payload.get("s3_path"),
+                platform_file_path=payload.get("platform_file_path") or payload.get("s3_path"),
+                version=payload.get("version"),
+            )
+            if not result:
+                raise RuntimeError("rename_file_event failed")
+            return "renamed"
+
+        logger.warning("Unknown message type '%s'; skipping processing", message_type)
+        return "skipped"
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def worker_loop(queue_url: str) -> None:
@@ -177,7 +238,8 @@ def worker_loop(queue_url: str) -> None:
             try:
                 # Parse payload and run pipeline synchronously (CPU-heavy)
                 payload = _parse_payload(body)
-                run_pipeline(payload)  # raises on failure
+                action = _process_message_by_type(payload)
+                logger.info("Processed message id=%s via action=%s", message_id, action)
 
                 # On success, delete message
                 _delete_message(sqs_client, queue_url, receipt_handle, message_id)

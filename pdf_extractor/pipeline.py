@@ -43,25 +43,27 @@ def run_pipeline(payload_or_file_id, s3_path: str | None = None):
         log.info("[vision] disabled via env (PDF_EXTRACTOR_USE_VISION/USE_VISION)")
 
     # DB: upsert initial file record using provided metadata
+    db_session = None
     try:
         from db.connection import SessionLocal
         from helper import handle_file_from_files_ms
 
-        db = SessionLocal()
+        db_session = SessionLocal()
+        ctx.db_session = db_session  # let downstream steps (vision) log credits if needed
         db_info = handle_file_from_files_ms(
-            db=db,
+            db=db_session,
             external_file_id=file_id,
             user_id=ctx.user_id or file_id,
             tenant_id=ctx.tenant_id or "default_tenant",
             customer_id=ctx.customer_id or (ctx.tenant_id or "default_customer"),
             project_id=ctx.project_id or (ctx.tenant_id or "default_project"),
             file_name=ctx.file_name or file_id,
+            s3_file_path=s3,
             platform_file_path=ctx.platform_file_path or s3,
             version=ctx.version or 1,
         )
         if db_info and db_info.get("ai_file_id"):
             ctx.ai_file_id = db_info["ai_file_id"]
-        db.close()
     except Exception as exc:
         log.warning("[db] skipped/failed to upsert file record: %s", exc)
 
@@ -87,6 +89,12 @@ def run_pipeline(payload_or_file_id, s3_path: str | None = None):
     except Exception as exc:
         log.exception("Pipeline failed: %s", exc)
         raise
+    finally:
+        try:
+            if db_session:
+                db_session.close()
+        except Exception:
+            pass
 
 
 def main():

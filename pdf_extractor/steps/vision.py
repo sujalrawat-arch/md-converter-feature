@@ -5,6 +5,8 @@ import base64
 import os
 import io
 import time
+import random
+from datetime import datetime
 from typing import List, Dict, Any, Union
 
 
@@ -13,7 +15,7 @@ from PIL import Image
 
 # Import log_llm_credits for logging LLM token usage
 try:
-    from Prod.helper import log_llm_credits
+    from helper import log_llm_credits
 except ImportError:
     log_llm_credits = None
 
@@ -24,6 +26,24 @@ except Exception:  # pragma: no cover
 
 from ..config import OPENAI_API_KEY
 from ..utils import write_json, read_json
+
+
+def _vision_limits():
+    """Get runtime tunables for vision retries/concurrency."""
+    max_concurrency = int(os.getenv("VISION_MAX_CONCURRENCY", "2"))
+    max_retries = int(os.getenv("VISION_MAX_RETRIES", "5"))
+    backoff_base = float(os.getenv("VISION_BACKOFF_BASE", "0.6"))
+    backoff_max = float(os.getenv("VISION_BACKOFF_MAX", "6"))
+    return max(1, max_concurrency), max(0, max_retries), backoff_base, backoff_max
+
+
+def _fake_mode_enabled() -> bool:
+    return str(os.getenv("VISION_FAKE_MODE", "")).lower() in {"1", "true", "yes", "on"}
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text or "too many requests" in text
 
 
 def _group_blocks_by_page(textract_data: Union[dict, list]) -> Dict[int, List[dict]]:
@@ -155,7 +175,7 @@ def step_05_render_for_vision(ctx, log):
     ctx.save_status("vision_rendered", {"vision_rendered": True})
 
 
-async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, retries=2, ctx=None, log=None):
+async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, retries=2, backoff_base=0.6, backoff_max=6.0, ctx=None, log=None):
     """
     Analyzes a single cropped figure (Chart/Graph/Flowchart).
     """
@@ -224,7 +244,11 @@ async def _vision_analyze_figure(async_client, semaphore, img_bytes, fig_meta, r
                 }
             except Exception as exc:
                 if attempt < retries:
-                    await asyncio.sleep(2 * (attempt + 1))
+                    sleep_for = min(backoff_max, backoff_base * (2 ** attempt))
+                    sleep_for += random.random() * 0.2
+                    if log and _is_rate_limit(exc):
+                        log.warning(f"[vision] Rate limit hit; retrying attempt {attempt+1}/{retries} in {sleep_for:.2f}s")
+                    await asyncio.sleep(sleep_for)
                     continue
                 return {
                     "error": str(exc),
@@ -238,8 +262,10 @@ def step_06_vision_async(ctx, log):
     if ctx.last_step == "vision":
         log.info("[vision] skipping (already processed)")
         return
-    
-    if not OPENAI_API_KEY or AsyncOpenAI is None:
+
+    fake_mode = _fake_mode_enabled()
+
+    if (not OPENAI_API_KEY or AsyncOpenAI is None) and not fake_mode:
         log.warning("[vision] skipping (no key)")
         write_json(ctx.vision_json, {"skipped": True})
         ctx.save_status("vision")
@@ -265,8 +291,9 @@ def step_06_vision_async(ctx, log):
 
 
     async def run():
-        async_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        semaphore = asyncio.Semaphore(min(5, (os.cpu_count() or 4)))
+        async_client = None if fake_mode else AsyncOpenAI(api_key=OPENAI_API_KEY)
+        max_concurrency, max_retries, backoff_base, backoff_max = _vision_limits()
+        semaphore = asyncio.Semaphore(max_concurrency)
 
         blocks_by_page = _group_blocks_by_page(textract_json)
         total_blocks = sum(len(b) for b in blocks_by_page.values())
@@ -344,14 +371,49 @@ def step_06_vision_async(ctx, log):
                     "id": block.get("Id"),
                     "image_path": img_path,
                 }
-                tasks.append(_vision_analyze_figure(async_client, semaphore, img_bytes, meta, ctx=ctx, log=log))
+                if fake_mode:
+                    # Produce a dummy analysis without calling the LLM
+                    tasks.append(
+                        {
+                            "page": meta["page"],
+                            "bbox": meta["bbox"],
+                            "block_id": meta["id"],
+                            "image_path": meta.get("image_path"),
+                            "analysis": "[FAKE] Vision analysis placeholder.",
+                            "ok": True,
+                            "llm_usage": {
+                                "tokens_used": 50,
+                                "input_size": 30,
+                                "output_size": 20,
+                            },
+                        }
+                    )
+                else:
+                    tasks.append(
+                        _vision_analyze_figure(
+                            async_client,
+                            semaphore,
+                            img_bytes,
+                            meta,
+                            retries=max_retries,
+                            backoff_base=backoff_base,
+                            backoff_max=backoff_max,
+                            ctx=ctx,
+                            log=log,
+                        )
+                    )
                 total_figures += 1
         doc.close()
         if not tasks:
             log.info("[vision] No figures found to analyze across all pages.")
             return {"figures": [], "count": 0}
-        log.info(f"[vision] Sending {total_figures} figures to GPT-4o for analysis...")
-        results = await asyncio.gather(*tasks)
+
+        if fake_mode:
+            log.info(f"[vision] Fake mode enabled; generating dummy results for {len(tasks)} figures")
+            results = tasks  # already concrete dicts
+        else:
+            log.info(f"[vision] Sending {total_figures} figures to GPT-4o for analysis...")
+            results = await asyncio.gather(*tasks)
         ok_results = [r for r in results if r.get("ok")]
         failed_results = [r for r in results if not r.get("ok")]
         # Aggregate LLM usage

@@ -1,45 +1,84 @@
 # PDF Extractor Pipeline
 
-This repository contains a modular, resumable pipeline that ingests arbitrary office documents from S3, converts them to PDF, classifies and normalizes each page, invokes AWS Textract plus optional OpenAI Vision, and publishes a Markdown knowledge artifact back to S3. The workflow was split into composable steps so it is easier to test, resume, or extend.
 
-## Pipeline Flow Diagram
+This repository contains a modular, resumable pipeline that ingests arbitrary office documents from S3, converts them to PDF, classifies and normalizes each page, invokes AWS Textract plus optional OpenAI Vision, and publishes a Markdown knowledge artifact back to S3. The workflow is split into composable steps for easier testing, resumption, and extension.
+
+## SQS Workflow Integration
+
+The pipeline supports SQS-based job submission and queue management. Use the provided utility script (`sqs_utils.py`) to:
+- Submit jobs to the SQS queue
+- Monitor queue status and DLQ (Dead Letter Queue)
+- Purge the queue if needed
+
+This enables distributed, scalable processing of document extraction jobs.
+
+
+## Updated Pipeline Flow Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                         PDF EXTRACTOR PIPELINE                               │
+│                         PDF EXTRACTOR PIPELINE (with SQS)                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-  Step 01               Step 02               Step 03               Step 04
-   DOWNLOAD      →       CONVERT        →      CLASSIFY      →     TEXTRACT
-     │                    │                     │                    │
-  S3 Source      LibreOffice/        Page rotation/         AWS Textract
-  Bucket         Pillow/ReportLab    classification        JSON extraction
-     │                    │                     │                    │
-     └────────────────────┴─────────────────────┴────────────────────┘
-                              │
-                              ↓
-                     Step 05: VISION (optional)
-                              │
-                    OpenAI Vision API
-                    Image analysis
-                              │
-                              ↓
-                     Step 06: UNIFY
-                              │
-                   Combine Textract +
-                   Vision + Metadata
-                              │
-                              ↓
-                   Step 07: UPLOAD
-                              │
-                    Push Markdown to
-                   S3 Output Bucket
-                              │
-                              ↓
-                   ✓ COMPLETE & RESUME-SAFE
+  [Job Submission]
+      │
+      │  (via sqs_utils.py or other client)
+      ↓
+  SQS QUEUE  ──────────────▶  Worker(s) poll for jobs
+      │
+      │
+      ▼
+  Step 01: DOWNLOAD      →  Step 02: CONVERT      →  Step 03: CLASSIFY      →  Step 04: TEXTRACT
+    S3 Source                LibreOffice/              Page rotation/             AWS Textract
+    Bucket                   Pillow/ReportLab          classification            JSON extraction
+      │                           │                          │                          │
+      └───────────────────────────┴──────────────────────────┴──────────────────────────┘
+                                              │
+                                              ↓
+                                     Step 05: VISION (optional)
+                                              │
+                                    OpenAI Vision API
+                                    Image analysis
+                                              │
+                                              ↓
+                                     Step 06: UNIFY
+                                              │
+                                   Combine Textract +
+                                   Vision + Metadata
+                                              │
+                                              ↓
+                                     Step 07: UPLOAD
+                                              │
+                                    Push Markdown to
+                                   S3 Output Bucket
+                                              │
+                                              ↓
+                                   ✓ COMPLETE & RESUME-SAFE
 
-Status persisted after each step → allows resuming from last checkpoint
+Status is persisted after each step, allowing resumption from the last checkpoint. SQS queue and DLQ can be monitored and managed using sqs_utils.py.
 ```
+## SQS Utility Script
+
+The `sqs_utils.py` script provides command-line tools for interacting with the SQS queue:
+
+- **Send a job to the queue:**
+  ```powershell
+  python sqs_utils.py send-message --job-id <job-id> --bucket <s3-bucket> --key <s3-key>
+  ```
+- **Check queue status:**
+  ```powershell
+  python sqs_utils.py get-queue-status
+  ```
+- **Check DLQ (Dead Letter Queue) status:**
+  ```powershell
+  python sqs_utils.py check-dlq
+  ```
+- **Purge all messages from the queue (dangerous):**
+  ```powershell
+  python sqs_utils.py purge-queue --yes
+  ```
+
+This enables you to submit jobs, monitor processing, and manage the queue directly from the command line.
 
 ## Key Features
 - **Multi-format ingestion** – downloads any file type from `AWS_BUCKET_PDF_READER_SOURCE` and converts it to PDF via LibreOffice, ReportLab, or Pillow helpers (`pdf_extractor/convert.py`).
@@ -48,7 +87,7 @@ Status persisted after each step → allows resuming from last checkpoint
 - **Vision sidecar** – image-heavy pages are rendered and (optionally) cropped figures are saved as PNGs, summarized asynchronously via OpenAI (if `OPENAI_API_KEY` is set), and merged inline instead of appended at the end of the doc.
 - **Testing support** – Pytest suite under `tests/` exercises conversion utilities, pipeline wiring, context handling, and Markdown assembly logic.
 
-## Project Layout
+## Project Layout (Key Files)
 ```
 pdf_extractor/
   config.py           # settings + env wiring
@@ -62,17 +101,19 @@ tests/                         # pytest-based regression coverage
 The pipeline stores working data under `pdf_extractor/exec/` (created automatically):
 - `data/` – raw downloads + converted PDFs
 - `textract_output/<file-id>/` – job log, checkpoints (`status.json`), Textract JSON, rendered images, Markdown output, etc.
-
-## Prerequisites
-1. **Python** 3.11+ (a virtualenv lives in `venv/`).
-2. **Dependencies** – install once:
-   ```powershell
-   .\venv\Scripts\python -m pip install -r requirements.txt
-   ```
 3. **LibreOffice** (for DOC/DOCX/PPT/PPTX conversion). If the binary is not on `PATH`, set `SOFFICE_PATH` to `soffice.exe`, e.g.:
    ```powershell
-   setx SOFFICE_PATH "C:\Program Files\LibreOffice\program\soffice.exe"
+```
+pdf_extractor/
+  config.py           # settings + env wiring
+  context.py          # JobCtx (paths, state persistence, logging)
+  convert.py          # multi-format converters + SOFFICE shim
+  pipeline.py         # CLI-friendly orchestrator
+  steps/              # numbered pipeline stages (download, convert, classify, etc.)
+pdf_extractor_reset_table.py  # minimal CLI entry point (run this script)
+sqs_utils.py                   # SQS job/queue utility (submit, monitor, purge)
    ```
+```
 4. **Tesseract OCR** (for optical character recognition, used by pytessaract):
    - Download and install from [Tesseract GitHub Releases](https://github.com/UB-Mannheim/tesseract/wiki)
    - Recommended: Install to `C:\Program Files\Tesseract-OCR`

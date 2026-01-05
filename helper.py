@@ -166,6 +166,7 @@ def handle_file_from_files_ms(
     project_id: str,
     file_name: str,
     platform_file_path: str,
+    s3_file_path: str,
     version: int
 ):
     """
@@ -179,13 +180,13 @@ def handle_file_from_files_ms(
     # --------------------------------------------------
     # 1. Fake AI S3 path (separate from File MS bucket)
     # --------------------------------------------------
-    fake_ai_s3_path = (
-        f"s3://ai-bucket/"
-        f"{tenant_id}/"
-        f"{file_name}/"
-        f"v{version}/"
-        f"{file_name}"
-    )
+    # fake_ai_s3_path = (
+    #     f"s3://ai-bucket/"
+    #     f"{tenant_id}/"
+    #     f"{file_name}/"
+    #     f"v{version}/"
+    #     f"{file_name}"
+    # )
 
     # --------------------------------------------------
     # 2. Create / Update file record
@@ -198,7 +199,7 @@ def handle_file_from_files_ms(
         customer_id=customer_id,
         project_id=project_id,
         file_name=file_name,
-        s3_file_path=fake_ai_s3_path,
+        s3_file_path=s3_file_path,
         platform_file_path=platform_file_path,
         version=version
     )
@@ -209,9 +210,77 @@ def handle_file_from_files_ms(
 
     return {
         "ai_file_id": ai_file_id,
-        "ai_s3_path": fake_ai_s3_path,
+        "ai_s3_path": s3_file_path,
         "version": version
     }
+
+
+def handle_delete_file_event(
+    db: Session,
+    external_file_id: str,
+    tenant_id: str,
+    file_name: str,
+    s3_file_path: str | None = None,
+    platform_file_path: str | None = None,
+    version: int | None = None,
+):
+    """Wrapper for delete events coming from File MS/SQS."""
+
+    return delete_file(
+        db=db,
+        external_file_id=external_file_id,
+        tenant_id=tenant_id,
+        file_name=file_name,
+        s3_file_path=s3_file_path,
+        platform_file_path=platform_file_path,
+        version=version,
+    )
+
+
+def handle_rename_file_event(
+    db: Session,
+    external_file_id: str,
+    user_id: str,
+    tenant_id: str,
+    customer_id: str,
+    project_id: str,
+    new_file_name: str,
+    s3_file_path: str | None = None,
+    platform_file_path: str | None = None,
+    version: int | None = None,
+):
+    """Resolve active record by external ID then rename while keeping ai_file_id."""
+
+    try:
+        active = (
+            db.query(FileData)
+            .filter(
+                FileData.tenant_id == tenant_id,
+                FileData.external_file_id == external_file_id,
+                FileData.e_dt == END_OF_TIME,
+            )
+            .first()
+        )
+
+        if not active:
+            return None
+
+        return rename_file_record(
+            db=db,
+            ai_file_id=active.ai_file_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            project_id=project_id,
+            old_file_name=active.file_name,
+            new_file_name=new_file_name,
+            s3_file_path=s3_file_path or active.cloud_file_path,
+            platform_file_path=platform_file_path or active.platform_file_path,
+            version=version if version is not None else active.version + 1,
+        )
+    except Exception:
+        db.rollback()
+        return None
 
 
 def rename_file_record(
@@ -275,6 +344,8 @@ def rename_file_record(
             tenant_id=tenant_id,
             customer_id=customer_id,
             project_id=project_id,
+            md_file_path=active.md_file_path,
+            md_file_id=active.md_file_id,
             file_hash=active.file_hash  # content unchanged
         )
 
