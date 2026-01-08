@@ -43,6 +43,7 @@ def upsert_file(
         new_file_record = FileData(
             ai_file_id=ai_file_id,
             st_dt=now,
+            file_date=now,
             e_dt=END_OF_TIME,
             external_file_id=external_file_id,
             cloud_file_path=s3_file_path,
@@ -333,6 +334,7 @@ def rename_file_record(
         new_record = FileData(
             ai_file_id=ai_file_id,
             st_dt=now,
+            file_date=now,
             e_dt=END_OF_TIME,
             external_file_id=active.external_file_id,
             cloud_file_path=s3_file_path,

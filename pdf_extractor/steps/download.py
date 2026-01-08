@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 import boto3
 from botocore.exceptions import ClientError
@@ -36,6 +37,11 @@ def step_00_download(ctx, log):
                 key = url.split(".amazonaws.com/")[-1]
     if not bucket or not key:
         raise ValueError(f"Cannot parse bucket/key from {url}")
+
+    decoded_key = unquote_plus(key)
+    if decoded_key != key:
+        log.info("[download] decoded s3 key → %s", decoded_key)
+    key = decoded_key
 
     ext = Path(key).suffix.lower() or ".pdf"
     dest = Path(ctx.source_path).with_suffix(ext)
@@ -83,7 +89,9 @@ def step_08_upload_and_cleanup(ctx, log):
     https_url = f"https://{BUCKET_OUT}.s3.{AWS_REGION}.amazonaws.com/{key}"
     payload = {
         "file_id": ctx.file_id,
-        "s3_path": https_url
+        "s3_path": https_url,
+        "ai_file_id": ctx.ai_file_id or ctx.file_id,
+        "tenant_id": ctx.tenant_id,
     }
     log.info("[upload] s3://%s/%s", BUCKET_OUT, key)
 
