@@ -92,6 +92,7 @@ def step_08_upload_and_cleanup(ctx, log):
         "s3_path": https_url,
         "ai_file_id": ctx.ai_file_id or ctx.file_id,
         "tenant_id": ctx.tenant_id,
+        "version": ctx.version
     }
     log.info("[upload] s3://%s/%s", BUCKET_OUT, key)
 
