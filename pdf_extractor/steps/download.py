@@ -44,7 +44,10 @@ def step_00_download(ctx, log):
     key = decoded_key
 
     ext = Path(key).suffix.lower() or ".pdf"
-    dest = Path(ctx.source_path).with_suffix(ext)
+    dest = Path(ctx.source_path)
+    if dest.suffix != ext:
+        dest = dest.with_suffix(ext)
+    ctx.file_name = dest.name
     dest.parent.mkdir(parents=True, exist_ok=True)
     ctx.source_path = str(dest)
 

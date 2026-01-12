@@ -4,12 +4,24 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 import fitz
 
 from .config import DATA_DIR, MAX_PAGES, OUTPUT_ROOT
 from .utils import ensure_dir, now_ms, read_json, write_json
+
+
+def _sanitize_filename(raw: str, fallback: str) -> str:
+    """Return a safe filename, falling back if empty/invalid."""
+    name = (raw or "").strip().replace("\\", "/")
+    name = os.path.basename(name)
+    if not name:
+        return fallback
+    cleaned = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in name)
+    cleaned = cleaned.strip(". ") or fallback
+    return cleaned
 
 
 @dataclass
@@ -69,6 +81,9 @@ class JobCtx:
     def build_from_payload(payload: dict) -> "JobCtx":
         fid = str(payload.get("file_id", "")).strip()
         s3_path = str(payload.get("s3_path", "")).strip()
+        raw_file_name = str(payload.get("filename", "") or payload.get("file_name", "")).strip()
+        file_name = _sanitize_filename(raw_file_name, fid)
+        stem = Path(file_name).stem or fid
         job_dir = ensure_dir(os.path.join(OUTPUT_ROOT, fid))
         return JobCtx(
             file_id=fid,
@@ -77,20 +92,20 @@ class JobCtx:
             log_file=os.path.join(job_dir, "job.log"),
             status_file=os.path.join(job_dir, "status.json"),
             api_status_file=os.path.join(job_dir, "api_status.json"),
-            source_path=os.path.join(DATA_DIR, f"{fid}.source"),
-            local_pdf=os.path.join(DATA_DIR, f"{fid}.pdf"),
-            norm_pdf=os.path.join(job_dir, f"{fid}.normalized.pdf"),
+            source_path=os.path.join(job_dir, file_name),
+            local_pdf=os.path.join(job_dir, f"{stem}.pdf"),
+            norm_pdf=os.path.join(job_dir, f"{stem}.normalized.pdf"),
             pages_dir=ensure_dir(os.path.join(job_dir, "pages")),
             vision_dir=ensure_dir(os.path.join(job_dir, "vision_imgs")),
             textract_raw_json=os.path.join(job_dir, "textract_raw.json"),
             vision_json=os.path.join(job_dir, "vision_results.json"),
-            final_md=os.path.join(job_dir, f"{fid}.pdf.md"),
+            final_md=os.path.join(job_dir, f"{stem}.pdf.md"),
             user_id=str(payload.get("user_id", "")).strip(),
             tenant_id=str(payload.get("tenant_id", "")).strip(),
             customer_id=str(payload.get("customer_id", "")) or str(payload.get("tenant_id", "")).strip(),
             project_id=str(payload.get("project_id", "")) or str(payload.get("tenant_id", "")).strip(),
-            file_name=str(payload.get("filename", "")) or str(payload.get("file_name", "")).strip() or fid,
-            platform_file_path=str(payload.get("s3_path", "")).strip(),
+            file_name=file_name,
+            platform_file_path=s3_path,
             version=int(payload.get("version", 1) or 1),
             message=str(payload.get("message", "")).strip(),
             ai_file_id=str(payload.get("ai_file_id", "")).strip() or fid,
